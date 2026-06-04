@@ -1,6 +1,5 @@
 import numpy as np
 import pygad
-import random
 import urllib.request
 
 # ============================================================================

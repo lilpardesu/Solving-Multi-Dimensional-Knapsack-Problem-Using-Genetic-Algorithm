@@ -1,373 +1,141 @@
-```markdown
-# Multidimensional Knapsack Problem Solver using Genetic Algorithm
+# Multidimensional Knapsack Problem Solver
 
-![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue)
-![PyGAD](https://img.shields.io/badge/PyGAD-latest-green)
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
-
-This project solves the **Multidimensional Knapsack Problem (MKP)** using an **Adaptive Genetic Algorithm** powered by [PyGAD](https://pygad.readthedocs.io/). It integrates directly with **OR-Library** benchmark datasets and features intelligent convergence tracking with automatic early stopping.
+A genetic algorithm solver for the **Multidimensional Knapsack Problem (MKP)** using [PyGAD](https://pygad.readthedocs.io/). It fetches benchmark instances from the OR-Library, evolves solutions across multiple adaptive runs, and stops automatically when results are good enough.
 
 ---
 
-## Problem Description
+## What is the Multidimensional Knapsack Problem?
 
-The multidimensional knapsack problem involves:
-- **Selecting items** to maximize total value
-- **Respecting multiple weight constraints** (one per dimension)
-- Each item has **one value** and **multiple weights** (one per dimension)
+The classic knapsack problem asks: given a set of items, each with a value and a weight, which items should you pack to maximize total value without exceeding a weight limit?
 
-Formally:
-
-```
-Maximize:   Σ vᵢ · xᵢ
-Subject to: Σ wᵢⱼ · xᵢ ≤ cⱼ   for all j = 1..m
-            xᵢ ∈ {0, 1}
-```
-
-Where `vᵢ` = item value, `wᵢⱼ` = weight of item `i` in dimension `j`, `cⱼ` = capacity of dimension `j`.
+The **multidimensional** variant adds multiple simultaneous constraints — for example, weight, volume, and cost all at once. Each item must satisfy every constraint at the same time, making the problem significantly harder.
 
 ---
 
-## Features
+## How it works
 
-- ✅ Supports multiple weight dimensions (2D, 3D, nD knapsack)
-- ✅ **Adaptive multi-run GA** — automatically decides when to stop or continue
-- ✅ **ConvergenceTracker** — monitors optimality gap, stagnation, and hard caps
-- ✅ **Early stopping** within each generation via callback
-- ✅ Penalty-based fitness function for constraint violation handling
-- ✅ Direct integration with OR-Library benchmark datasets
-- ✅ Detailed per-dimension weight usage reporting
-- ✅ Reproducible runs via configurable random seed
+The solver runs a genetic algorithm (GA) that evolves a population of binary solutions (1 = item selected, 0 = not selected). Each individual is scored by a **fitness function** that rewards high total value and penalizes constraint violations.
 
----
+Rather than running a fixed number of generations, it uses an **adaptive loop**:
 
-## Project Structure
+1. Run the GA for up to N generations
+2. After each run, check whether the result is good enough:
+   - Is the solution within 2% of the known optimal value?
+   - Has improvement stagnated for the last 30 generations?
+   - Has the total generation budget been exhausted?
+3. If none of those conditions are met, start another run with a different random seed
+4. Repeat until a stopping condition is triggered
 
-```
-.
-├── knapsack.py       # Main solver (all components in one file)
-├── requirements.txt  # Python dependencies
-└── README.md
-```
-
-### Key Components
-
-| Component | Description |
-|---|---|
-| `download_or_library_data()` | Downloads benchmark data from OR-Library |
-| `parse_or_library_format()` | Parses OR-Library `.txt` format into problem dicts |
-| `KnapsackProblem` | Stores problem data; provides fitness function and solution decoder |
-| `ConvergenceTracker` | Tracks GA progress; decides early stop and between-run continuation |
-| `callback_generation()` | PyGAD generation callback; logs progress and triggers early stop |
-| `solve_knapsack_adaptive()` | Main adaptive solver loop; runs multiple GA rounds intelligently |
+This means the solver automatically does more work on hard problems and stops early on easy ones.
 
 ---
 
-## Installation
+## Requirements
 
-**Requirements:** Python 3.8+
+- Python 3.8+
+- Dependencies listed in `requirements.txt`:
 
-1. Clone the repository:
-```bash
-git clone https://github.com/your-username/knapsack-ga.git
-cd knapsack-ga
+```
+pygad==3.0.0
+numpy>=1.21.0
+pandas>=1.3.0
 ```
 
-2. Install dependencies:
+Install with:
+
 ```bash
 pip install -r requirements.txt
-```
-
-**requirements.txt:**
-```
-pygad
-numpy
 ```
 
 ---
 
 ## Usage
 
-### Run the Solver (Default)
+Run the solver directly:
 
 ```bash
-python knapsack.py
+python solution.py
 ```
 
-This will:
-1. Download `mknapcb1.txt` from OR-Library automatically
-2. Parse and load the first benchmark problem (100 items, 5 constraints)
-3. Run the adaptive GA with convergence tracking
-4. Print detailed results and optimality gap
+On startup it will:
 
----
+1. Download `mknapcb1.txt` from the OR-Library (10 benchmark MKP instances)
+2. Solve the first problem using the adaptive GA
+3. Print per-generation progress, convergence reports, and a final solution summary
 
-### Use the Adaptive Solver in Your Code
+### Configurable parameters
 
-```python
-from knapsack import download_or_library_data, KnapsackProblem, solve_knapsack_adaptive
-
-# Load OR-Library data
-problems = download_or_library_data("mknapcb1")
-data = problems[0]
-
-# Create problem instance
-problem = KnapsackProblem(
-    values=data["values"],
-    weights=data["weights"],
-    capacities=data["capacities"],
-    problem_id=data["problem_id"],
-    optimal_value=data["optimal_value"],
-)
-
-# Run adaptive solver
-best_solution, selected_items, total_value, tracker = solve_knapsack_adaptive(
-    problem,
-    generations_per_run=100,     # Max generations per GA round
-    population_size=50,          # Population size
-    seed=42,                     # Random seed
-    gap_threshold=0.02,          # Stop if within 2% of optimal
-    stagnation_window=30,        # Stop if no improvement for 30 gens
-    max_total_generations=1000,  # Hard cap across all runs
-)
-```
-
----
-
-### Use Custom Problem Data
-
-```python
-from knapsack import KnapsackProblem, solve_knapsack_adaptive
-
-values     = [10, 20, 15, 25, 30]
-weights    = [[2, 3], [5, 4], [3, 5], [4, 6], [6, 5]]
-capacities = [20, 25]
-
-problem = KnapsackProblem(values, weights, capacities)
-
-best_solution, selected_items, total_value, tracker = solve_knapsack_adaptive(
-    problem,
-    generations_per_run=100,
-    population_size=50,
-)
-```
-
----
-
-### Parse Different OR-Library Files
-
-```python
-from knapsack import download_or_library_data
-
-problems = download_or_library_data("mknapcb4")
-
-for p in problems:
-    print(f"Problem {p['problem_id']}: {p['num_items']} items, "
-          f"{p['num_constraints']} dims, optimal={p['optimal_value']}")
-```
-
----
-
-## Adaptive Solver Parameters
+These can be adjusted in the `solve_knapsack_adaptive(...)` call at the bottom of `solution.py`:
 
 | Parameter | Default | Description |
 |---|---|---|
 | `generations_per_run` | `100` | Max generations per GA round |
-| `population_size` | `50` | Number of individuals per generation |
-| `seed` | `42` | Initial random seed (incremented each run) |
+| `population_size` | `50` | Number of solutions per generation |
+| `seed` | `42` | Initial random seed (increments each run) |
 | `gap_threshold` | `0.02` | Stop when within this fraction of optimal (2%) |
-| `stagnation_window` | `30` | Generations without improvement to trigger stagnation stop |
-| `max_total_generations` | `1000` | Hard cap on total generations across all runs |
+| `stagnation_window` | `30` | Generations without improvement before stopping |
+| `max_total_generations` | `1000` | Hard cap across all runs |
 
 ---
 
-## Convergence Tracker
+## Project structure
 
-The `ConvergenceTracker` class controls **when the solver stops**, both **within a run** (via the generation callback) and **between runs**.
+```
+.
+├── solution.py        # Main solver (all logic in one file)
+└── requirements.txt   # Python dependencies
+```
 
-### Stopping Conditions (checked in order)
+### Key components inside `solution.py`
 
-| Condition | Description |
+| Component | Role |
 |---|---|
-| **Hard cap** | `total_generations_run >= max_total_generations` |
-| **Optimality gap** | Best fitness is within `gap_threshold` of known optimal |
-| **Stagnation** | No meaningful improvement (`< 0.1%`) in last `stagnation_window` generations |
-| **Optimal found** | Gap ≤ 0 (best equals or exceeds known optimal) |
-
-### Convergence Report (printed after each run)
-
-```
-────────────────────────────────────────────────────────────
-  Convergence Report (after run #2)
-────────────────────────────────────────────────────────────
-  Total generations run : 187
-  Best fitness so far   : 13521.00
-  Optimality gap        : 1.50%
-  Stagnated             : No
-────────────────────────────────────────────────────────────
-```
+| `download_or_library_data` | Fetches benchmark `.txt` files from OR-Library by name |
+| `parse_or_library_format` | Parses the integer-token format used by OR-Library |
+| `KnapsackProblem` | Wraps problem data; provides the fitness function and solution decoder |
+| `ConvergenceTracker` | Tracks fitness history; decides whether to stop or run more generations |
+| `callback_generation` | PyGAD hook called every generation; feeds the tracker and triggers early stops |
+| `solve_knapsack_adaptive` | Outer loop that launches GA runs until the tracker is satisfied |
 
 ---
 
-## GA Configuration
+## Output
 
-| Parameter | Value | Notes |
-|---|---|---|
-| Gene type | `int` (0 or 1) | Binary encoding |
-| Parent selection | Tournament (`K=3`) | Competitive selection |
-| Crossover | Uniform | Even gene mixing |
-| Mutation | Random | ~10% of genes per individual |
-| Duplicate genes | Allowed | Binary genes may repeat |
-
----
-
-## Fitness Function
+A typical run prints:
 
 ```
-fitness = Σ(vᵢ · xᵢ)  −  Σⱼ max(0, Σᵢ wᵢⱼ · xᵢ − cⱼ) × 10
-```
-
-- **Reward:** total value of selected items
-- **Penalty:** `excess_weight × 10` for each violated dimension
-- Penalty coefficient (`10`) can be tuned for tighter constraint enforcement
-
----
-
-## OR-Library Datasets
-
-| File | Problems | Items | Constraints | Notes |
-|---|---|---|---|---|
-| `mknap1.txt` | 7 | varies | varies | Small classic instances |
-| `mknap2.txt` | 48 | varies | varies | Medium instances |
-| `mknapcb1.txt` – `mknapcb9.txt` | 30 each | 100 | 5 | Standard benchmarks |
-
-### Tightness Ratios in mknapcb Files
-
-| Problems | Tightness | Difficulty |
-|---|---|---|
-| 1–10 | 0.25 | Easy (loose constraints) |
-| 11–20 | 0.50 | Medium |
-| 21–30 | 0.75 | Hard (tight constraints) |
-
-> **Reference:** https://people.brunel.ac.uk/~mastjjb/jeb/orlib/mknapinfo.html
-
----
-
-## Output Example
-
-```
-Downloading OR-Library test data (mknapcb1.txt)...
-
-======================================================================
-MULTIDIMENSIONAL KNAPSACK — OR-LIBRARY TEST DATA
-======================================================================
-  Problem ID      : 1
-  Items           : 100
-  Constraints     : 5
-  Known Optimal   : 24381
-  Capacities      : [6120, 8648, ...]
-======================================================================
-
-ADAPTIVE GENETIC ALGORITHM SOLVER
-======================================================================
-
 >>> Starting run #1 (up to 100 generations, seed: 42)
-  Gen    1 | Best Fitness = 19800.00
-  Gen   10 | Best Fitness = 22400.00
-  Gen   50 | Best Fitness = 23800.00
-  Gen  100 | Best Fitness = 24010.50
-
-────────────────────────────────────────────────────────────
+  Gen    1 | Best Fitness = 3214.00
+  Gen   10 | Best Fitness = 3501.00
+  ...
+  ────────────────────────────────────────────────────────────
   Convergence Report (after run #1)
-────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────
   Total generations run : 100
-  Best fitness so far   : 24010.50
-  Optimality gap        : 1.52%
+  Best fitness so far   : 3720.00
+  Optimality gap        : 1.85%
   Stagnated             : No
-────────────────────────────────────────────────────────────
-
->>> Starting run #2 (up to 100 generations, seed: 43)
-  Gen   30 | Best Fitness = 24200.00
-  [Early stop triggered at gen 47]
-
-────────────────────────────────────────────────────────────
-  Convergence Report (after run #2)
-────────────────────────────────────────────────────────────
-  Total generations run : 147
-  Best fitness so far   : 24200.00
-  Optimality gap        : 0.74%
-  Stagnated             : Yes
-────────────────────────────────────────────────────────────
-
-■ Stopping: Stagnated: no improvement in last 30 generations
-
-======================================================================
-FINAL RESULT
-======================================================================
-Total runs        : 2
-Total generations : 147
-Best fitness      : 24200.00
-
-======================================================================
-SOLUTION DETAILS
-======================================================================
-Selected items   : [2, 5, 9, 14, ...]
-Items count      : 47
-Total value      : 24200
-
-Weight Usage by Dimension:
-  Dim  0:   6100.0 / 6120 ( 99.7%) ✓
-  Dim  1:   8600.0 / 8648 ( 99.4%) ✓
-  Dim  2:   7200.0 / 7314 ( 98.4%) ✓
-  Dim  3:   5900.0 / 5916 ( 99.7%) ✓
-  Dim  4:   6100.0 / 6254 ( 97.5%) ✓
-
-Feasible: Yes ✓
-======================================================================
-
-Optimality gap    : 0.74%
+  ────────────────────────────────────────────────────────────
 ```
 
+Followed by a final solution summary showing selected items, weight usage per dimension, and feasibility status.
+
 ---
 
-## Performance Guidelines
+## Data source
 
-| Problem Size | Recommended Settings |
+Test instances come from the [OR-Library](https://people.brunel.ac.uk/~mastjjb/jeb/orlib/mknapinfo.html) maintained by J.E. Beasley. The default file `mknapcb1.txt` contains 10 problems with 100 items and 5 constraints each, with known optimal values included for benchmarking.
+
+---
+
+## Algorithm details
+
+| GA setting | Value |
 |---|---|
-| Small (< 50 items) | `generations_per_run=50`, `population_size=30` |
-| Medium (50–200 items) | `generations_per_run=100`, `population_size=50` |
-| Large (> 200 items) | `generations_per_run=300`, `population_size=100–200` |
-| Tight constraints | Increase penalty multiplier; larger population |
+| Selection | Tournament (k=3) |
+| Crossover | Uniform |
+| Mutation | Random, ~10% of genes per individual |
+| Gene type | Integer (0 or 1) |
+| Parent pool | 50% of population |
 
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|---|---|
-| No feasible solution | Increase penalty multiplier (default `10`) in `fitness_function` |
-| Slow convergence | Increase `population_size` or `max_total_generations` |
-| Network error on download | Check internet connection; download file manually |
-| Solver stops too early | Increase `stagnation_window` or `max_total_generations` |
-| Solver never stops | Reduce `max_total_generations` or tighten `gap_threshold` |
-
----
-
-## Theory
-
-- **Binary Encoding** — each gene represents one item: `1` = selected, `0` = not selected
-- **Tournament Selection** — `K=3` candidates compete; fittest parent wins
-- **Uniform Crossover** — each gene independently inherited from either parent
-- **Random Mutation** — approximately 10% of genes flipped per individual
-- **Penalty Method** — infeasible solutions penalized proportionally to constraint excess
-- **Adaptive Restart** — each run uses a different seed to escape local optima
-
----
-
-## References
-
-- PyGAD Documentation: https://pygad.readthedocs.io/
-- OR-Library: https://people.brunel.ac.uk/~mastjjb/jeb/orlib/
-- Genetic Algorithms: https://en.wikipedia.org/wiki/Genetic_algorithm
-- Knapsack Problem: https://en.wikipedia.org/wiki/Knapsack_problem
-- Chu, P.C. and Beasley, J.E. *"A genetic algorithm for the multidimensional knapsack problem"*, Journal of Heuristics, vol. 4, 1998, pp. 63–86
+Infeasible solutions are not discarded — they receive a penalty proportional to how much they exceed each capacity, allowing the GA to evolve toward feasibility gradually.
