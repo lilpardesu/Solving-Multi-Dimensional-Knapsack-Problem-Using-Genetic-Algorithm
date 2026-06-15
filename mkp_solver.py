@@ -1,52 +1,44 @@
 """
-Multidimensional Knapsack Problem Solver (OR-Library)
-Optimized single-file implementation using Genetic Algorithm (PyGAD)
-with Greedy Repair and Greedy Initialization.
+Multidimensional Knapsack Problem Solver — fully local & auto-tuned.
 
-Usage examples:
-    python mkp_solver.py                              # default: solve 3 problems from mknapcb1
-    python mkp_solver.py --file mknapcb1 --num 5      # solve first 5 problems
-    python mkp_solver.py --file mknapcb1 --single 1   # solve only problem #1
-    python mkp_solver.py --gens 200 --pop 80          # tune GA parameters
+Place OR-Library dataset files (e.g. mknapcb1.txt) in ./data/
+
+Usage:
+    python mkp_solver.py                    # solves problem #1 of mknapcb1
+    python mkp_solver.py --file mknapcb2    # different dataset
+    python mkp_solver.py --single 7         # different problem
+    python mkp_solver.py --all              # solve all problems in the file
+    python mkp_solver.py --list             # list available local datasets
 """
 
 import argparse
 import os
-import urllib.request
+import sys
 import traceback
 import numpy as np
 import pygad
 import pandas as pd
 
-OR_LIBRARY_URL = "https://people.brunel.ac.uk/~mastjjb/jeb/orlib/files/{name}.txt"
+DATA_DIR = "data"
 
 
 # ============================================================================
 # Data Loading
 # ============================================================================
 
-def load_or_library(name="mknapcb1", use_cache=True, timeout=15):
-    """Load OR-Library dataset (from local cache if available, else download)."""
-    cache_file = f"{name}.txt"
-
-    if use_cache and os.path.exists(cache_file):
-        with open(cache_file, "r", encoding="utf-8") as f:
-            data = f.read()
-        print(f"[cache] loaded {cache_file}")
-    else:
-        url = OR_LIBRARY_URL.format(name=name)
-        print(f"[download] {url}")
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            data = r.read().decode("utf-8")
-        with open(cache_file, "w", encoding="utf-8") as f:
-            f.write(data)
-        print(f"[cache] saved to {cache_file}")
-
+def load_or_library(name="mknapcb1", data_dir=DATA_DIR):
+    path = os.path.join(data_dir, f"{name}.txt")
+    if not os.path.exists(path):
+        print(f"\nERROR: file not found: {path}")
+        print(f"Place '{name}.txt' inside the '{data_dir}/' folder.\n")
+        sys.exit(1)
+    with open(path, "r", encoding="utf-8") as f:
+        data = f.read()
+    print(f"[local] loaded {path}")
     return parse_or_library(data)
 
 
 def parse_or_library(text):
-    """Parse OR-Library multidimensional knapsack file format."""
     t = list(map(int, text.split()))
     i = 0
     num_problems = t[i]; i += 1
@@ -64,56 +56,166 @@ def parse_or_library(text):
         })
     return problems
 
+# ============================================================================
+# Known-best & LP results (mkcbres.txt)
+# ============================================================================
+
+# mknapcb file → (m, n) mapping
+MKNAPCB_MAP = {
+    "mknapcb1": (5, 100),  "mknapcb2": (5, 250),  "mknapcb3": (5, 500),
+    "mknapcb4": (10, 100), "mknapcb5": (10, 250), "mknapcb6": (10, 500),
+    "mknapcb7": (30, 100), "mknapcb8": (30, 250), "mknapcb9": (30, 500),
+}
+
+
+def load_known_results(data_dir=DATA_DIR, filename="mkcbres.txt"):
+    """
+    Parse mkcbres.txt. Returns {(m, n, idx): {"bks": int, "lp": float}}.
+    idx is 0-based as in the file (00..29).
+    """
+    path = os.path.join(data_dir, filename)
+    if not os.path.exists(path):
+        return {}
+
+    results = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            name, val = parts
+            # name looks like "5.100-00"
+            if "." not in name or "-" not in name:
+                continue
+            try:
+                left, idx = name.split("-")
+                m, n = left.split(".")
+                m, n, idx = int(m), int(n), int(idx)
+                v = float(val)
+            except ValueError:
+                continue
+
+            key = (m, n, idx)
+            entry = results.setdefault(key, {})
+            # BKS appears first (integer), LP appears later (scientific)
+            if "bks" not in entry:
+                entry["bks"] = int(v)
+            else:
+                entry["lp"] = v
+    return results
+
+
+def lookup_known(file_name, problem_id, known_results):
+    """Look up BKS and LP for a given mknapcb file + 1-based problem id."""
+    if file_name not in MKNAPCB_MAP:
+        return None, None
+    m, n = MKNAPCB_MAP[file_name]
+    entry = known_results.get((m, n, problem_id - 1))
+    if not entry:
+        return None, None
+    return entry.get("bks"), entry.get("lp")
+ 
+
+def list_local_datasets(data_dir=DATA_DIR):
+    if not os.path.isdir(data_dir):
+        print(f"No '{data_dir}/' folder found.")
+        return []
+    files = sorted(f for f in os.listdir(data_dir) if f.endswith(".txt"))
+    if not files:
+        print(f"No .txt files in '{data_dir}/'.")
+        return []
+    print(f"\nLocal datasets in '{data_dir}/':")
+    for f in files:
+        print(f"  - {f}")
+    return files
+
+
+# ============================================================================
+# Auto-Tuning — choose GA parameters from problem dimensions
+# ============================================================================
+
+def auto_tune(n, m):
+    """
+    Pick GA hyper-parameters based on problem size.
+    Returns a dict of recommended settings.
+    """
+    # --- population & generations scale with n ------------------------------
+    if n <= 50:
+        pop_size, generations, stagnation = 40, 150, 30
+        size_tag = "small"
+    elif n <= 100:
+        pop_size, generations, stagnation = 80, 300, 50
+        size_tag = "medium"
+    elif n <= 250:
+        pop_size, generations, stagnation = 150, 600, 80
+        size_tag = "large"
+    else:
+        pop_size, generations, stagnation = 200, 1000, 120
+        size_tag = "x-large"
+
+    # --- more constraints → harder problem → bump effort up -----------------
+    if m >= 10:
+        pop_size = int(pop_size * 1.3)
+        generations = int(generations * 1.3)
+        stagnation = int(stagnation * 1.3)
+    elif m >= 5:
+        pop_size = int(pop_size * 1.1)
+        generations = int(generations * 1.1)
+
+    # --- mutation rate: standard 1/n, slightly higher for tight problems ----
+    mutation_rate = max(0.01, 1.0 / n)
+    if m / max(n, 1) > 0.1:           # many constraints relative to items
+        mutation_rate *= 1.5
+
+    # --- crossover & elitism are robust defaults ----------------------------
+    return {
+        "size_tag": size_tag,
+        "pop_size": pop_size,
+        "generations": generations,
+        "stagnation": stagnation,
+        "mutation_rate": round(mutation_rate, 4),
+        "crossover_prob": 0.9,
+        "elitism": max(2, pop_size // 25),
+        "tournament_k": 3,
+        "gap_threshold": 0.001,   # stop if within 0.1% of optimum
+    }
+
 
 # ============================================================================
 # Knapsack Problem
 # ============================================================================
 
 class MKP:
-    """Multidimensional Knapsack Problem with vectorized operations."""
-
     def __init__(self, values, weights, capacities, optimal=0, pid=None):
         self.values = np.asarray(values, dtype=np.float64)
-        self.weights = np.asarray(weights, dtype=np.float64)     # shape (m, n)
-        self.capacities = np.asarray(capacities, dtype=np.float64)  # shape (m,)
+        self.weights = np.asarray(weights, dtype=np.float64)
+        self.capacities = np.asarray(capacities, dtype=np.float64)
         self.n = len(values)
         self.m = len(capacities)
         self.optimal = optimal
         self.pid = pid
 
-        # Precompute pseudo-utility ratio for greedy operations:
-        # sum of normalized weight across dimensions vs value
-        weight_sum = self.weights.sum(axis=0)  # shape (n,)
+        weight_sum = self.weights.sum(axis=0)
         weight_sum = np.where(weight_sum == 0, 1e-9, weight_sum)
         self.ratio = self.values / weight_sum
-        self.order_desc = np.argsort(-self.ratio)  # best first
-        self.order_asc = np.argsort(self.ratio)    # worst first
+        self.order_desc = np.argsort(-self.ratio)
+        self.order_asc = np.argsort(self.ratio)
 
-    # -- evaluation ----------------------------------------------------------
     def total_value(self, sol):
         return float(np.dot(sol, self.values))
 
     def total_weights(self, sol):
         return self.weights @ sol
 
-    def is_feasible(self, sol):
-        return np.all(self.total_weights(sol) <= self.capacities)
-
-    # -- repair / construction ----------------------------------------------
     def greedy_repair(self, sol):
-        """If infeasible, drop low-ratio items until feasible; then add others."""
         sol = sol.astype(np.int8).copy()
         loads = self.total_weights(sol)
-
-        # DROP phase: remove worst items while infeasible
         for idx in self.order_asc:
             if np.all(loads <= self.capacities):
                 break
             if sol[idx] == 1:
                 sol[idx] = 0
                 loads -= self.weights[:, idx]
-
-        # ADD phase: try to add best items that still fit
         for idx in self.order_desc:
             if sol[idx] == 0:
                 new_loads = loads + self.weights[:, idx]
@@ -123,7 +225,6 @@ class MKP:
         return sol
 
     def greedy_solution(self):
-        """Pure greedy construction (used to seed the GA population)."""
         sol = np.zeros(self.n, dtype=np.int8)
         loads = np.zeros(self.m)
         for idx in self.order_desc:
@@ -135,29 +236,24 @@ class MKP:
 
 
 # ============================================================================
-# Genetic Algorithm Solver
+# Genetic Algorithm (uses auto-tuned params)
 # ============================================================================
 
-def solve_mkp(problem, generations=100, pop_size=50, seed=42,
-              gap_threshold=0.001, stagnation=40, verbose=True):
-    """
-    Solve MKP using PyGAD with greedy repair + greedy seeding.
-    Returns (best_solution, total_value, gap_percent_or_None).
-    """
-    n = problem.n
+def solve_mkp(problem, params=None, seed=42, verbose=True):
+    if params is None:
+        params = auto_tune(problem.n, problem.m)
 
-    # ---- Build initial population: 1 greedy + rest random (then repaired) --
+    n = problem.n
+    pop_size = params["pop_size"]
     rng = np.random.default_rng(seed)
+
     init_pop = np.zeros((pop_size, n), dtype=np.int8)
     init_pop[0] = problem.greedy_solution()
     for i in range(1, pop_size):
-        # Random density biased toward feasibility (~30-60% items)
         density = rng.uniform(0.3, 0.6)
         sol = (rng.random(n) < density).astype(np.int8)
         init_pop[i] = problem.greedy_repair(sol)
 
-    # ---- Fitness: repair the solution then return its value ---------------
-    # We store repaired versions back to ga_instance via on_generation hook.
     stats = {"best": -np.inf, "stagn": 0, "best_sol": init_pop[0].copy()}
 
     def fitness_func(ga, sol, idx):
@@ -165,48 +261,50 @@ def solve_mkp(problem, generations=100, pop_size=50, seed=42,
         return problem.total_value(sol)
 
     def on_gen(ga):
-        sol, fit, _ = ga.best_solution()
-        sol_repaired = problem.greedy_repair(np.asarray(sol, dtype=np.int8))
-        fit = problem.total_value(sol_repaired)
+        sol, _, _ = ga.best_solution()
+        sol_rep = problem.greedy_repair(np.asarray(sol, dtype=np.int8))
+        fit = problem.total_value(sol_rep)
 
         if fit > stats["best"] + 1e-9:
             stats["best"] = fit
-            stats["best_sol"] = sol_repaired
+            stats["best_sol"] = sol_rep
             stats["stagn"] = 0
         else:
             stats["stagn"] += 1
 
-        if verbose and (ga.generations_completed % 20 == 0 or ga.generations_completed == 1):
-            gap_str = ""
+        gen = ga.generations_completed
+        if verbose and (gen % 25 == 0 or gen == 1):
+            extra = ""
             if problem.optimal > 0:
                 gap = (problem.optimal - stats["best"]) / problem.optimal * 100
-                gap_str = f" | gap={gap:.2f}%"
-            print(f"  gen {ga.generations_completed:>4} | best={stats['best']:.0f}{gap_str}")
+                extra = f" | gap={gap:.2f}%"
+            print(f"  gen {gen:>4} | best={stats['best']:.0f}{extra}")
 
-        # Early stop conditions
         if problem.optimal > 0:
             gap = (problem.optimal - stats["best"]) / problem.optimal
-            if gap <= gap_threshold:
+            if gap <= params["gap_threshold"]:
+                if verbose:
+                    print(f"  [early stop: reached target gap @ gen {gen}]")
                 return "stop"
-        if stats["stagn"] >= stagnation:
+        if stats["stagn"] >= params["stagnation"]:
             if verbose:
-                print(f"  [early stop: stagnation @ gen {ga.generations_completed}]")
+                print(f"  [early stop: stagnation @ gen {gen}]")
             return "stop"
 
     ga = pygad.GA(
-        num_generations=generations,
+        num_generations=params["generations"],
         num_parents_mating=max(2, pop_size // 2),
         fitness_func=fitness_func,
         initial_population=init_pop,
         gene_type=int,
         gene_space=[0, 1],
         parent_selection_type="tournament",
-        K_tournament=3,
+        K_tournament=params["tournament_k"],
         crossover_type="uniform",
-        crossover_probability=0.9,
+        crossover_probability=params["crossover_prob"],
         mutation_type="random",
-        mutation_probability=max(0.01, 1.0 / n),
-        keep_elitism=2,
+        mutation_probability=params["mutation_rate"],
+        keep_elitism=params["elitism"],
         random_seed=seed,
         on_generation=on_gen,
         suppress_warnings=True,
@@ -215,116 +313,134 @@ def solve_mkp(problem, generations=100, pop_size=50, seed=42,
 
     best_sol = stats["best_sol"]
     best_val = problem.total_value(best_sol)
-    gap = None
-    if problem.optimal > 0:
-        gap = (problem.optimal - best_val) / problem.optimal * 100
+    gap = (problem.optimal - best_val) / problem.optimal * 100 if problem.optimal > 0 else None
     return best_sol, best_val, gap
 
 
 # ============================================================================
-# Driver / CLI
+# Driver
 # ============================================================================
 
-def solve_batch(problem_file="mknapcb1", num=3, generations=100, pop_size=50,
-                threshold_pct=1.0, verbose=True):
-    """Solve several problems and report a summary."""
-    print(f"\n{'='*70}\nMKP SOLVER — {problem_file}\n{'='*70}")
+def print_params(params, n, m):
+    print(f"  auto-tuned params  → size class : {params['size_tag']}  (n={n}, m={m})")
+    print(f"     population      = {params['pop_size']}")
+    print(f"     generations     = {params['generations']}")
+    print(f"     stagnation stop = {params['stagn'] if 'stagn' in params else params['stagnation']}")
+    print(f"     mutation rate   = {params['mutation_rate']}")
+    print(f"     crossover prob  = {params['crossover_prob']}")
+    print(f"     elitism         = {params['elitism']}")
+    print(f"     gap target      = {params['gap_threshold']*100:.2f}%")
+
+def solve_single(problem_file, pid, verbose=True):
+    print(f"\n{'='*70}\nMKP SOLVER — {problem_file}  | problem #{pid}\n{'='*70}")
     problems = load_or_library(problem_file)
-    if not problems:
+    if pid < 1 or pid > len(problems):
+        print(f"Problem #{pid} not in {problem_file} (has {len(problems)} problems).")
         return None
+    pdata = problems[pid - 1]
 
-    if num:
-        problems = problems[:num]
-    print(f"Solving {len(problems)} problem(s)...\n")
+    # Lookup known best solution & LP from mkcbres.txt
+    known = load_known_results()
+    bks, lp = lookup_known(problem_file, pid, known)
 
+    problem = MKP(pdata["values"], pdata["weights"], pdata["capacities"],
+                  optimal=0, pid=pdata["id"])
+    params = auto_tune(problem.n, problem.m)
+
+    print(f"\nProblem {pid}: items={problem.n}, constraints={problem.m}")
+    if bks is not None:
+        print(f"  Known best solution (Chu & Beasley 1997): {bks}")
+    if lp is not None:
+        print(f"  LP relaxation (upper bound)             : {lp:.2f}")
+    print_params(params, problem.n, problem.m)
+    print()
+
+    sol, val, _ = solve_mkp(problem, params=params, verbose=verbose)
+
+    print(f"\n{'─'*70}\nRESULT")
+    print(f"  value            : {int(val)}")
+    print(f"  selected         : {int(sol.sum())}/{problem.n} items")
+    if bks is not None:
+        gap_bks = (bks - val) / bks * 100
+        sign = "+" if val > bks else ""
+        diff = int(val - bks)
+        print(f"  vs BKS ({bks})   : {sign}{diff}  ({gap_bks:+.2f}% gap)")
+        if val >= bks:
+            print(f"  🏆 matched or beat the known best!")
+        elif gap_bks < 1.0:
+            print(f"  ✓ within 1% of best known — excellent")
+        elif gap_bks < 3.0:
+            print(f"  ✓ within 3% of best known — good")
+    if lp is not None:
+        gap_lp = (lp - val) / lp * 100
+        print(f"  vs LP  ({lp:.0f}) : {gap_lp:.2f}% gap (LP is an upper bound)")
+    return sol, val
+
+
+def solve_all(problem_file, verbose=False):
+    print(f"\n{'='*70}\nMKP SOLVER — {problem_file} (ALL)\n{'='*70}")
+    problems = load_or_library(problem_file)
+    known = load_known_results()
     rows = []
     for pdata in problems:
         pid = pdata["id"]
-        print(f"\n── Problem {pid:2d} | items={pdata['n']} | "
-              f"constraints={pdata['m']} | optimal={pdata['optimal']} ──")
+        bks, lp = lookup_known(problem_file, pid, known)
+        print(f"\n── Problem {pid:2d} | n={pdata['n']} m={pdata['m']}"
+              + (f" | BKS={bks}" if bks else "") + " ──")
         try:
             problem = MKP(pdata["values"], pdata["weights"], pdata["capacities"],
-                          optimal=pdata["optimal"], pid=pid)
-            sol, val, gap = solve_mkp(problem, generations=generations,
-                                      pop_size=pop_size, verbose=verbose)
-            selected = int(sol.sum())
+                          optimal=0, pid=pid)
+            params = auto_tune(problem.n, problem.m)
+            sol, val, _ = solve_mkp(problem, params=params, verbose=verbose)
+            gap_bks = (bks - val) / bks * 100 if bks else None
             rows.append({
                 "Problem": pid,
-                "Items": pdata["n"],
-                "Constraints": pdata["m"],
-                "Optimal": pdata["optimal"] if pdata["optimal"] > 0 else None,
+                "n": pdata["n"], "m": pdata["m"],
+                "BKS": bks,
                 "Found": int(val),
-                "Selected": selected,
-                "Gap (%)": round(gap, 2) if gap is not None else None,
-                "Within {0}%?".format(threshold_pct):
-                    "✓" if (gap is not None and gap <= threshold_pct) else "✗",
+                "Gap vs BKS (%)": round(gap_bks, 2) if gap_bks is not None else None,
+                "Selected": int(sol.sum()),
             })
-            print(f"  → value={int(val)}  selected={selected}/{pdata['n']}"
-                  + (f"  gap={gap:.2f}%" if gap is not None else ""))
+            tag = f" gap={gap_bks:.2f}%" if gap_bks is not None else ""
+            print(f"  → value={int(val)}{tag}")
         except Exception as e:
-            print(f"  ERROR on problem {pid}: {e}")
+            print(f"  ERROR: {e}")
             traceback.print_exc()
 
-    # ---- Summary ----------------------------------------------------------
     print(f"\n{'='*70}\nSUMMARY\n{'='*70}")
-    if not rows:
-        print("No results.")
-        return rows
-
     df = pd.DataFrame(rows)
     print(df.to_string(index=False))
 
-    gaps = [r["Gap (%)"] for r in rows if r["Gap (%)"] is not None]
+    gaps = [r["Gap vs BKS (%)"] for r in rows if r["Gap vs BKS (%)"] is not None]
     if gaps:
-        print(f"\nStatistics over {len(gaps)} problems:")
-        print(f"  average gap : {np.mean(gaps):.2f}%")
-        print(f"  best  gap   : {min(gaps):.2f}%")
-        print(f"  worst gap   : {max(gaps):.2f}%")
-        within = sum(1 for g in gaps if g <= threshold_pct)
-        print(f"  within {threshold_pct}% of optimal: {within}/{len(gaps)}")
-    return rows
+        print(f"\naverage gap vs BKS : {np.mean(gaps):.2f}%")
+        print(f"best  gap          : {min(gaps):.2f}%")
+        print(f"worst gap          : {max(gaps):.2f}%")
+        print(f"within 1% of BKS   : {sum(1 for g in gaps if g <= 1.0)}/{len(gaps)}")
+        print(f"matched or beat BKS: {sum(1 for g in gaps if g <= 0)}/{len(gaps)}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="OR-Library MKP Solver")
+    ap = argparse.ArgumentParser(description="OR-Library MKP Solver (local, auto-tuned)")
     ap.add_argument("--file", default="mknapcb1",
-                    help="OR-Library dataset name (mknap1, mknap2, mknapcb1..9)")
-    ap.add_argument("--num", type=int, default=3,
-                    help="how many problems to solve (default 3, 0 = all)")
-    ap.add_argument("--single", type=int, default=None,
-                    help="solve only this single problem id (1-indexed)")
-    ap.add_argument("--gens", type=int, default=100, help="GA generations")
-    ap.add_argument("--pop", type=int, default=50, help="GA population size")
-    ap.add_argument("--threshold", type=float, default=1.0,
-                    help="percent gap considered 'optimal' (default 1.0)")
-    ap.add_argument("--quiet", action="store_true", help="less per-gen output")
+                    help="dataset name (without .txt) inside ./data/")
+    ap.add_argument("--single", type=int, default=1,
+                    help="solve this problem id (default 1)")
+    ap.add_argument("--all", action="store_true",
+                    help="solve all problems in the file")
+    ap.add_argument("--list", action="store_true",
+                    help="list local datasets and exit")
+    ap.add_argument("--quiet", action="store_true", help="less output")
+    
     args = ap.parse_args()
 
-    if args.single is not None:
-        problems = load_or_library(args.file)
-        if not problems or args.single < 1 or args.single > len(problems):
-            print(f"Problem #{args.single} not found in {args.file}.")
-            return
-        pdata = problems[args.single - 1]
-        print(f"\nSolving problem {args.single} of {args.file}...")
-        problem = MKP(pdata["values"], pdata["weights"], pdata["capacities"],
-                      optimal=pdata["optimal"], pid=pdata["id"])
-        sol, val, gap = solve_mkp(problem, generations=args.gens,
-                                  pop_size=args.pop, verbose=not args.quiet)
-        print(f"\nValue   : {int(val)}")
-        print(f"Selected: {int(sol.sum())}/{pdata['n']}")
-        if gap is not None:
-            print(f"Gap     : {gap:.2f}%")
+    if args.list:
+        list_local_datasets()
         return
-
-    solve_batch(
-        problem_file=args.file,
-        num=args.num if args.num > 0 else None,
-        generations=args.gens,
-        pop_size=args.pop,
-        threshold_pct=args.threshold,
-        verbose=not args.quiet,
-    )
+    if args.all:
+        solve_all(args.file, verbose=not args.quiet)
+        return
+    solve_single(args.file, args.single, verbose=not args.quiet)
 
 
 if __name__ == "__main__":
